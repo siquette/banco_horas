@@ -7,6 +7,9 @@ from io import BytesIO
 from typing import Tuple, Optional
 from sqlalchemy import text 
 
+# --- IMPORT NOVO (Refatoração) ---
+from mock_data import gerar_dados_ficticios
+
 # --- CONFIGURAÇÕES GERAIS ---
 st.set_page_config(page_title="Gestão de Tempo Analytics", layout="wide", page_icon="📊")
 META_DIARIA = 8.0 
@@ -40,7 +43,6 @@ if not check_password():
     st.stop()
 
 # --- CAMADA DE DADOS (POSTGRESQL / NEON) ---
-# @st.cache_resource ajuda a manter a conexão viva e evita o erro de SSL intermitente
 @st.cache_resource
 def get_db_connection():
     return st.connection("postgresql", type="sql")
@@ -48,7 +50,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     with conn.session as s:
-        # Cria a tabela e SALVA (COMMIT) imediatamente
         s.execute(text('''
             CREATE TABLE IF NOT EXISTS registros (
                 data TEXT PRIMARY KEY,
@@ -64,7 +65,6 @@ def init_db():
         '''))
         s.commit()
 
-        # Migrações (Idempotentes)
         try:
             s.execute(text("ALTER TABLE registros ADD COLUMN extra_inicio TEXT;"))
             s.commit()
@@ -113,7 +113,6 @@ def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs,
 
 def carregar_dados():
     conn = get_db_connection()
-    # ttl=0 força recarregar os dados do banco (sem cache de dados)
     return conn.query("SELECT * FROM registros", ttl=0)
 
 def excluir_registro(data_str):
@@ -184,13 +183,35 @@ def definir_meta(row: pd.Series) -> Tuple[float, str]:
     if pd.notnull(data_dt) and data_dt.weekday() >= 5: return 0.0, "Fim de Semana"
     return META_DIARIA, "Dia Útil"
 
-# --- INTERFACE ---
+# --- MAIN EXECUTION ---
 try:
     init_db()
 except Exception as e:
-    st.error(f"Erro ao conectar no banco: {e}")
-    st.info("Dica: Verifique se o banco Neon está ativo ou se o secrets.toml está configurado sem 'channel_binding'.")
+    # Apenas loga, não para a execução (importante para modo demo funcionar sem rede)
+    print(f"Aviso conexão: {e}")
 
+# --- SIDEBAR E MODO DEMO ---
+# --- SIDEBAR E MODO DEMO ---
+with st.sidebar:
+    st.header("⚙️ Configurações")
+    modo_demo = st.toggle("🧪 Modo Demonstração", help="Gera dados fictícios para testar os gráficos")
+    
+    if modo_demo:
+        st.warning("⚠️ Visualizando Dados Fictícios")
+        df_bd = gerar_dados_ficticios()
+        
+        # --- LINHA DE DEBUG (Adicione aqui) ---
+        st.write(f"🐞 Debug: {len(df_bd)} linhas geradas")
+        # --------------------------------------
+        
+    else:
+        try:
+            df_bd = carregar_dados()
+        except Exception as e:
+            st.error(f"Erro ao carregar banco: {e}")
+            df_bd = pd.DataFrame()
+
+# --- ABAS ---
 tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
 # ---------------- ABA 1: LANÇAMENTO ----------------
@@ -203,12 +224,9 @@ with tab_lancamento:
             st.subheader("Novo Registro")
             data_sel = st.date_input("Data", date.today())
             
-            # Tratamento de erro caso o banco esteja vazio/inativo
-            try:
-                df_bd = carregar_dados()
-                rec = df_bd[df_bd['data'] == str(data_sel)] if not df_bd.empty else pd.DataFrame()
-            except:
-                df_bd = pd.DataFrame()
+            if not df_bd.empty:
+                rec = df_bd[df_bd['data'] == str(data_sel)]
+            else:
                 rec = pd.DataFrame()
 
             d_ent, d_sai = time(9,0), time(18,0)
@@ -228,33 +246,41 @@ with tab_lancamento:
                     d_ext_fim = time(h, m)
                 except: pass
 
-            is_feriado = st.checkbox("Feriado/Folga?", value=d_feriado)
+            # Inputs (Bloqueados se for modo demo)
+            disable_inputs = modo_demo or st.checkbox("Feriado/Folga?", value=d_feriado)
+            
             c1, c2 = st.columns(2)
-            entrada = c1.time_input("Entrada", d_ent, disabled=is_feriado)
-            saida = c2.time_input("Saída", d_sai, disabled=is_feriado)
+            entrada = c1.time_input("Entrada", d_ent, disabled=disable_inputs)
+            saida = c2.time_input("Saída", d_sai, disabled=disable_inputs)
             c3, c4 = st.columns(2)
-            almoco_ida = c3.time_input("Almoço Ida", d_ai, disabled=is_feriado)
-            almoco_volta = c4.time_input("Almoço Volta", d_av, disabled=is_feriado)
+            almoco_ida = c3.time_input("Almoço Ida", d_ai, disabled=disable_inputs)
+            almoco_volta = c4.time_input("Almoço Volta", d_av, disabled=disable_inputs)
+            
             st.caption("Trabalho Extra (Casa)")
             c5, c6 = st.columns(2)
-            ext_ini = c5.time_input("Início Extra", d_ext_ini)
-            ext_fim = c6.time_input("Fim Extra", d_ext_fim)
-            obs = st.text_area("Obs", value=d_obs, height=68)
+            ext_ini = c5.time_input("Início Extra", d_ext_ini, disabled=modo_demo)
+            ext_fim = c6.time_input("Fim Extra", d_ext_fim, disabled=modo_demo)
+            obs = st.text_area("Obs", value=d_obs, height=68, disabled=modo_demo)
             
-            if st.button("Salvar Registro", type="primary", use_container_width=True):
-                salvar_registro(str(data_sel), entrada, almoco_ida, almoco_volta, saida, ext_ini, ext_fim, obs, is_feriado)
-                st.toast("Registro Salvo com Sucesso!")
-                st.rerun()
+            if modo_demo:
+                st.info("🔒 Edição bloqueada no Modo Demo")
+            else:
+                if st.button("Salvar Registro", type="primary", use_container_width=True):
+                    salvar_registro(str(data_sel), entrada, almoco_ida, almoco_volta, saida, ext_ini, ext_fim, obs, disable_inputs)
+                    st.toast("Registro Salvo com Sucesso!")
+                    st.rerun()
 
             st.markdown("---")
             with st.expander("🗑️ Excluir / Corrigir Data Errada"):
-                if not df_bd.empty:
+                if not df_bd.empty and not modo_demo:
                     lista_datas = df_bd['data'].sort_values(ascending=False).tolist()
                     data_para_excluir = st.selectbox("Selecione o dia para apagar:", options=lista_datas)
                     if st.button("🗑️ Apagar Registro Selecionado", type="secondary", use_container_width=True):
                         excluir_registro(data_para_excluir)
                         st.success(f"Registro de {data_para_excluir} apagado!")
                         st.rerun()
+                elif modo_demo:
+                    st.info("Exclusão desativada no Modo Demo.")
                 else:
                     st.info("Não há registros para excluir.")
 
@@ -306,23 +332,52 @@ with tab_analytics:
         st.markdown("---")
 
         # 1. HEATMAP MENSAL
-        st.subheader("📅 Calendário de Intensidade")
-        df_filtered['day'] = df_filtered['data_dt'].dt.day
-        df_filtered['month_name'] = df_filtered['data_dt'].dt.strftime("%B")
-        df_filtered['month_num'] = df_filtered['data_dt'].dt.month
+        # 1. HEATMAP ESTILO GITHUB (Contribuições Anuais)
+        st.subheader("📅 Mapa de Contribuições (GitHub Style)")
         
-        heatmap_data = df_filtered.groupby(['month_num', 'month_name', 'day'])['total_trabalhado'].sum().reset_index()
+        # Engenharia de Features para o Gráfico
+        # Precisamos: Semana do Ano (X) e Dia da Semana (Y)
+        df_filtered['week'] = df_filtered['data_dt'].dt.isocalendar().week
+        df_filtered['weekday_num'] = df_filtered['data_dt'].dt.weekday # 0=Segunda, 6=Domingo
+        df_filtered['year'] = df_filtered['data_dt'].dt.year
         
-        fig_cal = px.density_heatmap(
-            heatmap_data, x="day", y="month_name", z="total_trabalhado", 
-            nbinsx=31, color_continuous_scale="Greens",
-            title="Mapa de Calor: Intensidade por Dia do Mês",
-            labels={'day': 'Dia', 'month_name': 'Mês', 'total_trabalhado': 'Horas'}
+        # Agrupamento (Soma horas por dia/semana)
+        heatmap_data = df_filtered.groupby(['year', 'week', 'weekday_num'])['total_trabalhado'].sum().reset_index()
+        
+        # Importante: O Plotly Graph Objects (go) dá mais controle visual que o Express (px)
+        import plotly.graph_objects as go
+        
+        fig_git = go.Figure(data=go.Heatmap(
+            z=heatmap_data['total_trabalhado'],
+            x=heatmap_data['week'],
+            y=heatmap_data['weekday_num'],
+            colorscale='Greens', # Cor clássica do GitHub
+            xgap=3, # Espacinho horizontal entre os quadrados (O Segredo!)
+            ygap=3, # Espacinho vertical
+            hoverongaps=False,
+            hovertemplate="Semana: %{x}<br>Dia: %{y}<br>Horas: %{z:.2f}h<extra></extra>"
+        ))
+
+        fig_git.update_layout(
+            title="Intensidade de Trabalho por Semana",
+            plot_bgcolor='rgba(0,0,0,0)', # Fundo transparente
+            height=250, # Altura reduzida para ficar compacto igual ao do Git
+            yaxis=dict(
+                tickmode='array',
+                tickvals=[0, 1, 2, 3, 4, 5, 6],
+                ticktext=['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'],
+                autorange='reversed', # Para Segunda-feira ficar no topo
+                title="" # Remove título do eixo Y para limpar
+            ),
+            xaxis=dict(
+                title="Semana do Ano",
+                showgrid=False # Remove linhas de grade para ficar limpo
+            ),
+            margin=dict(l=40, r=40, t=40, b=40) # Margens ajustadas
         )
-        # Correção do Import DateTime aqui
-        fig_cal.update_yaxes(categoryorder='array', categoryarray=sorted(df_filtered['month_name'].unique(), key=lambda x: dt.strptime(x, "%B").month))
-        fig_cal.update_xaxes(dtick=1)
-        st.plotly_chart(fig_cal, use_container_width=True)
+        
+        st.plotly_chart(fig_git, use_container_width=True)
+        st.caption("💡 **GitHub Style:** Cada quadrado é um dia. Quanto mais escuro, mais horas trabalhadas. Os espaços em branco são dias sem registro.")
 
         # 2. GRÁFICO DE BARRAS
         st.subheader("📊 Composição Diária")
@@ -373,8 +428,17 @@ with tab_analytics:
         def time_to_float(t_str):
             if pd.isna(t_str): return None
             try:
-                h, m, s = map(int, str(t_str).split(':'))
-                return h + (m/60)
+                # Divide a string pelos dois pontos
+                parts = list(map(int, str(t_str).split(':')))
+                
+                # Se tiver 3 partes (HH:MM:SS)
+                if len(parts) == 3:
+                    return parts[0] + (parts[1]/60)
+                # Se tiver 2 partes (HH:MM) - Caso do Modo Demo
+                elif len(parts) == 2:
+                    return parts[0] + (parts[1]/60)
+                    
+                return None
             except: return None
 
         df_filtered['entrada_num'] = df_filtered['entrada'].apply(time_to_float)
@@ -424,4 +488,7 @@ with tab_analytics:
         st.plotly_chart(fig_trend, use_container_width=True)
 
     else:
-        st.info("Insira dados na aba de Lançamento.")
+        if modo_demo:
+            st.info("O modo demo está ativo, mas não gerou dados. Verifique a função.")
+        else:
+            st.info("Insira dados na aba de Lançamento.")
