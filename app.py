@@ -311,6 +311,7 @@ with tab_lancamento:
 with tab_analytics:
     st.header("Análise Gerencial & BI")
     
+    # Verifica se tem dados ANTES de tentar plotar qualquer coisa
     if not df_bd.empty:
         df = processar_dataframe(df_bd)
         df[['meta', 'motivo']] = df.apply(definir_meta, axis=1, result_type='expand')
@@ -331,53 +332,31 @@ with tab_analytics:
 
         st.markdown("---")
 
-        # 1. HEATMAP MENSAL
-        # 1. HEATMAP ESTILO GITHUB (Contribuições Anuais)
+        # 1. HEATMAP ESTILO GITHUB
         st.subheader("📅 Mapa de Contribuições (GitHub Style)")
-        
-        # Engenharia de Features para o Gráfico
-        # Precisamos: Semana do Ano (X) e Dia da Semana (Y)
         df_filtered['week'] = df_filtered['data_dt'].dt.isocalendar().week
-        df_filtered['weekday_num'] = df_filtered['data_dt'].dt.weekday # 0=Segunda, 6=Domingo
+        df_filtered['weekday_num'] = df_filtered['data_dt'].dt.weekday
         df_filtered['year'] = df_filtered['data_dt'].dt.year
         
-        # Agrupamento (Soma horas por dia/semana)
         heatmap_data = df_filtered.groupby(['year', 'week', 'weekday_num'])['total_trabalhado'].sum().reset_index()
         
-        # Importante: O Plotly Graph Objects (go) dá mais controle visual que o Express (px)
         import plotly.graph_objects as go
-        
         fig_git = go.Figure(data=go.Heatmap(
             z=heatmap_data['total_trabalhado'],
             x=heatmap_data['week'],
             y=heatmap_data['weekday_num'],
-            colorscale='Greens', # Cor clássica do GitHub
-            xgap=3, # Espacinho horizontal entre os quadrados (O Segredo!)
-            ygap=3, # Espacinho vertical
-            hoverongaps=False,
+            colorscale='Greens',
+            xgap=3, ygap=3, hoverongaps=False,
             hovertemplate="Semana: %{x}<br>Dia: %{y}<br>Horas: %{z:.2f}h<extra></extra>"
         ))
-
         fig_git.update_layout(
             title="Intensidade de Trabalho por Semana",
-            plot_bgcolor='rgba(0,0,0,0)', # Fundo transparente
-            height=250, # Altura reduzida para ficar compacto igual ao do Git
-            yaxis=dict(
-                tickmode='array',
-                tickvals=[0, 1, 2, 3, 4, 5, 6],
-                ticktext=['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'],
-                autorange='reversed', # Para Segunda-feira ficar no topo
-                title="" # Remove título do eixo Y para limpar
-            ),
-            xaxis=dict(
-                title="Semana do Ano",
-                showgrid=False # Remove linhas de grade para ficar limpo
-            ),
-            margin=dict(l=40, r=40, t=40, b=40) # Margens ajustadas
+            plot_bgcolor='rgba(0,0,0,0)', height=250,
+            yaxis=dict(tickmode='array', tickvals=[0, 1, 2, 3, 4, 5, 6], ticktext=['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'], autorange='reversed', title=""),
+            xaxis=dict(title="Semana do Ano", showgrid=False),
+            margin=dict(l=40, r=40, t=40, b=40)
         )
-        
         st.plotly_chart(fig_git, use_container_width=True)
-        st.caption("💡 **GitHub Style:** Cada quadrado é um dia. Quanto mais escuro, mais horas trabalhadas. Os espaços em branco são dias sem registro.")
 
         # 2. GRÁFICO DE BARRAS
         st.subheader("📊 Composição Diária")
@@ -390,7 +369,6 @@ with tab_analytics:
             text_auto='.1f'
         )
         fig_bar.add_hline(y=META_DIARIA, line_dash="dot", line_color="red", annotation_text="Meta 8h")
-        fig_bar.update_traces(textfont_size=12, textangle=0, textposition="inside", cliponaxis=False)
         fig_bar.update_layout(hovermode="x unified", barmode='stack')
         st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -400,10 +378,7 @@ with tab_analytics:
             st.subheader("📈 Evolução do Banco")
             df_filtered = df_filtered.sort_values('data_dt')
             df_filtered['saldo_acumulado'] = df_filtered['saldo'].cumsum()
-            fig_line = px.line(
-                df_filtered, x='data', y='saldo_acumulado', markers=True,
-                title="Saldo Acumulado", line_shape="spline"
-            )
+            fig_line = px.line(df_filtered, x='data', y='saldo_acumulado', markers=True, title="Saldo Acumulado", line_shape="spline")
             fig_line.add_hline(y=0, line_dash="dot", line_color="gray")
             if not df_filtered.empty:
                 cor_linha = "green" if df_filtered['saldo_acumulado'].iloc[-1] >= 0 else "red"
@@ -412,13 +387,10 @@ with tab_analytics:
             
         with c_graf2:
             st.subheader("🥧 Distribuição Total")
-            total_escritorio = df_filtered['horas_escritorio'].sum()
-            total_casa = df_filtered['horas_casa'].sum()
             fig_pie = px.pie(
                 names=["Escritório", "Extra Casa"],
-                values=[total_escritorio, total_casa],
-                hole=0.4,
-                title="Proporção de Trabalho",
+                values=[df_filtered['horas_escritorio'].sum(), df_filtered['horas_casa'].sum()],
+                hole=0.4, title="Proporção de Trabalho",
                 color_discrete_sequence=['#3498DB', '#E67E22']
             )
             st.plotly_chart(fig_pie, use_container_width=True)
@@ -428,16 +400,9 @@ with tab_analytics:
         def time_to_float(t_str):
             if pd.isna(t_str): return None
             try:
-                # Divide a string pelos dois pontos
                 parts = list(map(int, str(t_str).split(':')))
-                
-                # Se tiver 3 partes (HH:MM:SS)
-                if len(parts) == 3:
-                    return parts[0] + (parts[1]/60)
-                # Se tiver 2 partes (HH:MM) - Caso do Modo Demo
-                elif len(parts) == 2:
-                    return parts[0] + (parts[1]/60)
-                    
+                if len(parts) == 3: return parts[0] + (parts[1]/60)
+                elif len(parts) == 2: return parts[0] + (parts[1]/60)
                 return None
             except: return None
 
@@ -456,10 +421,7 @@ with tab_analytics:
         # 5. VIOLIN PLOT
         st.subheader("🎻 Distribuição por Dia (Violin)")
         df_filtered['weekday_name'] = df_filtered['data_dt'].dt.strftime("%A")
-        dias_traducao = {
-            'Monday': 'Segunda', 'Tuesday': 'Terça', 'Wednesday': 'Quarta',
-            'Thursday': 'Quinta', 'Friday': 'Sexta', 'Saturday': 'Sábado', 'Sunday': 'Domingo'
-        }
+        dias_traducao = {'Monday': 'Segunda', 'Tuesday': 'Terça', 'Wednesday': 'Quarta', 'Thursday': 'Quinta', 'Friday': 'Sexta', 'Saturday': 'Sábado', 'Sunday': 'Domingo'}
         df_filtered['dia_pt'] = df_filtered['weekday_name'].map(dias_traducao).fillna(df_filtered['weekday_name'])
         ordem_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         
@@ -487,8 +449,45 @@ with tab_analytics:
         fig_trend.add_hline(y=META_DIARIA, line_color="red")
         st.plotly_chart(fig_trend, use_container_width=True)
 
+        st.markdown("---")
+        
+        # --- NOVOS GRÁFICOS (Agora DENTRO do if) ---
+        c_adv1, c_adv2 = st.columns(2)
+
+        # 8. ANÁLISE COMPARATIVA (TERRITÓRIO)
+        with c_adv1:
+            st.subheader("🏠 Território: Escritório vs. Híbrido")
+            def classificar_dia(row):
+                return "Dia Híbrido/Extra" if row['horas_casa'] > 0 else "Dia 100% Presencial"
+            
+            df_filtered['tipo_jornada'] = df_filtered.apply(classificar_dia, axis=1)
+            fig_comp = px.box(
+                df_filtered, x="tipo_jornada", y="total_trabalhado", color="tipo_jornada",
+                title="Onde você trabalha mais?",
+                color_discrete_map={'Dia 100% Presencial': '#3498DB', 'Dia Híbrido/Extra': '#E67E22'}
+            )
+            fig_comp.add_hline(y=META_DIARIA, line_dash="dot", annotation_text="Meta")
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+        # 9. HISTOGRAMA DE PONTUALIDADE
+        with c_adv2:
+            st.subheader("⏰ Consistência de Chegada")
+            fig_hist = px.histogram(
+                df_filtered, x="entrada_num", nbins=20, 
+                title="Distribuição do Horário de Chegada",
+                labels={'entrada_num': 'Hora de Chegada'}, color_discrete_sequence=['#9B59B6']
+            )
+            media_chegada = df_filtered['entrada_num'].mean()
+            if pd.notnull(media_chegada):
+                h_media = int(media_chegada)
+                m_media = int((media_chegada - h_media) * 60)
+                fig_hist.add_vline(x=media_chegada, line_dash="dot", annotation_text=f"Média {h_media:02d}:{m_media:02d}")
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+    # --- O ELSE FICOU AQUI NO FINAL (Correto) ---
     else:
+        # Se df_bd estiver vazio (e não for só filtro), mostra mensagem
         if modo_demo:
-            st.info("O modo demo está ativo, mas não gerou dados. Verifique a função.")
+            st.info("O modo demo está ativo, mas não gerou dados.")
         else:
             st.info("Insira dados na aba de Lançamento.")
