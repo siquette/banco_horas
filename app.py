@@ -1,32 +1,56 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import datetime
 from datetime import date, time, datetime as dt, timedelta
 import holidays
 import plotly.express as px
 from io import BytesIO
 from typing import Tuple, Optional, Any
+from sqlalchemy import text # Para escrever SQL puro de forma segura
 
 # --- CONFIGURAÇÕES GERAIS ---
 st.set_page_config(page_title="Gestão de Tempo Analytics", layout="wide", page_icon="📊")
-DB_FILE = "banco_horas_flex_v2.db"
 META_DIARIA = 8.0 
 
-# --- IMPORTS ADICIONAIS NECESSÁRIOS ---
-from sqlalchemy import text # Para escrever SQL puro de forma segura
+# --- AUTENTICAÇÃO ---
+def check_password():
+    """Retorna True se o usuário tiver a senha correta."""
+    
+    def password_entered():
+        """Verifica se a senha digitada bate com a dos segredos."""
+        if st.session_state["password"] == st.secrets["geral"]["senha_acesso"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Não armazena a senha na sessão
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.text_input(
+        "🔒 Digite a senha para acessar:", 
+        type="password", 
+        on_change=password_entered, 
+        key="password"
+    )
+    
+    if "password_correct" in st.session_state:
+        st.error("😕 Senha incorreta")
+        
+    return False
+
+if not check_password():
+    st.stop()
 
 # --- CAMADA DE DADOS (NEON / POSTGRESQL) ---
 def get_db_connection():
     """Recupera a conexão gerenciada do Streamlit"""
-    # Procura no secrets.toml pela seção [connections.postgresql]
     return st.connection("postgresql", type="sql")
 
 def init_db():
     conn = get_db_connection()
     with conn.session as s:
-        # 1. Cria a tabela e SALVA (COMMIT) imediatamente
-        # Isso garante que a tabela exista mesmo que os ALTER abaixo falhem
+        # Cria a tabela e SALVA (COMMIT) imediatamente
         s.execute(text('''
             CREATE TABLE IF NOT EXISTS registros (
                 data TEXT PRIMARY KEY,
@@ -40,29 +64,25 @@ def init_db():
                 feriado_manual INTEGER DEFAULT 0
             );
         '''))
-        s.commit() # <--- O PULO DO GATO: Salva a tabela antes de tentar mudar ela
+        s.commit()
 
-        # 2. Tenta adicionar colunas (Migrações) em transações isoladas
-        # Se der erro (ex: coluna já existe), fazemos rollback apenas desse comando
+        # Migrações
         try:
             s.execute(text("ALTER TABLE registros ADD COLUMN extra_inicio TEXT;"))
             s.commit()
         except:
-            s.rollback() # Limpa o erro se a coluna já existir
+            s.rollback()
 
         try:
             s.execute(text("ALTER TABLE registros ADD COLUMN extra_fim TEXT;"))
             s.commit()
         except:
-            s.rollback() # Limpa o erro se a coluna já existir
+            s.rollback()
 
-            
 def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs, is_feriado):
     conn = get_db_connection()
     feriado_int = 1 if is_feriado else 0
     
-    # Sintaxe PostgreSQL: usa :parametro em vez de ?
-    # ON CONFLICT (data) é compatível com Postgres!
     sql = text('''
         INSERT INTO registros (data, entrada, almoco_ida, almoco_volta, saida, extra_inicio, extra_fim, obs, feriado_manual)
         VALUES (:data, :ent, :ai, :av, :sai, :ei, :ef, :obs, :fer)
@@ -95,10 +115,27 @@ def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs,
 
 def carregar_dados():
     conn = get_db_connection()
-    # ttl=0 garante que ele não use cache antigo, sempre pegue o dado fresco do banco
     return conn.query("SELECT * FROM registros", ttl=0)
 
-# --- LÓGICA DE CÁLCULO (TIPADA E SEGURA) ---
+def excluir_registro(data_str):
+    conn = get_db_connection()
+    with conn.session as s:
+        s.execute(text("DELETE FROM registros WHERE data = :d"), {"d": data_str})
+        s.commit()
+
+# --- FUNÇÃO HELPER (EXCEL) ---
+def to_excel(df):
+    """Gera o arquivo Excel em memória para download."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Ponto')
+        # Formatação básica automática
+        worksheet = writer.sheets['Ponto']
+        worksheet.set_column('A:A', 12)  # Data
+        worksheet.set_column('B:G', 10)  # Horários
+    return output.getvalue()
+
+# --- LÓGICA DE NEGÓCIO ---
 def parse_db_time_to_delta(time_str: Optional[str]) -> timedelta:
     if pd.isna(time_str) or str(time_str).strip() in ['None', '']:
         return timedelta(0)
@@ -118,17 +155,6 @@ def calcular_delta_com_virada(inicio_str: Optional[str], fim_str: Optional[str])
     if delta.total_seconds() < 0:
         delta += timedelta(days=1)
     return delta.total_seconds() / 3600.0
-
-def excluir_registro(data_str):
-    """Remove um registro específico do banco de dados."""
-    conn = get_db_connection()
-    with conn.session as s:
-        # Query SQL para deletar
-        s.execute(
-            text("DELETE FROM registros WHERE data = :d"), 
-            {"d": data_str}
-        )
-        s.commit()
 
 def processar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty: return df
@@ -215,18 +241,10 @@ with tab_lancamento:
             st.markdown("---")
             with st.expander("🗑️ Excluir / Corrigir Data Errada"):
                 st.warning("Cuidado: A exclusão é permanente.")
-                
-                # Carrega as datas que existem no banco para facilitar
                 df_existentes = carregar_dados()
                 if not df_existentes.empty:
-                    # Cria uma lista de datas ordenada
                     lista_datas = df_existentes['data'].sort_values(ascending=False).tolist()
-                    
-                    data_para_excluir = st.selectbox(
-                        "Selecione o dia para apagar:", 
-                        options=lista_datas
-                    )
-                    
+                    data_para_excluir = st.selectbox("Selecione o dia para apagar:", options=lista_datas)
                     if st.button("🗑️ Apagar Registro Selecionado", type="secondary", use_container_width=True):
                         excluir_registro(data_para_excluir)
                         st.success(f"Registro de {data_para_excluir} apagado!")
@@ -247,12 +265,13 @@ with tab_lancamento:
             c_kpi2.metric("Total Extra (Casa)", f"{df['horas_casa'].sum():.2f} h")
             c_kpi3.metric("Dias Registrados", len(df))
             
+            # --- CORREÇÃO FEITA AQUI ---
             st.dataframe(
                 df[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo']]
                 .sort_values('data', ascending=False)
                 .style.format("{:.2f}", subset=['horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo'])
                 .background_gradient(subset=['saldo'], cmap='RdYlGn', vmin=-2, vmax=2),
-                width="stretch"
+                use_container_width=True
             )
             st.download_button("📥 Baixar Excel Completo", to_excel(df), "ponto_completo.xlsx")
         else:
@@ -302,7 +321,6 @@ with tab_analytics:
 
         # 2. NOVO GRÁFICO DE BARRAS (DIÁRIO)
         st.subheader("📊 Composição Diária (Regular + Extra)")
-        # Ordenar cronologicamente para o gráfico de barras
         df_bar = df_filtered.sort_values('data_dt')
         fig_bar = px.bar(
             df_bar, 
@@ -312,7 +330,6 @@ with tab_analytics:
             labels={'value': 'Horas', 'variable': 'Local', 'data': 'Data'},
             color_discrete_map={'horas_escritorio': '#3498DB', 'horas_casa': '#E67E22'}
         )
-        # Linha de Meta (8h) para referência
         fig_bar.add_hline(y=META_DIARIA, line_dash="dot", line_color="red", annotation_text="Meta 8h")
         fig_bar.update_layout(hovermode="x unified", barmode='stack')
         st.plotly_chart(fig_bar, use_container_width=True)
@@ -345,11 +362,10 @@ with tab_analytics:
                 color_discrete_sequence=['#3498DB', '#E67E22']
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-# 4. ANÁLISE DE COMPORTAMENTO (CORRELAÇÃO)
+
+        # 4. ANÁLISE DE COMPORTAMENTO (CORRELAÇÃO)
         st.subheader("🧩 Padrão de Comportamento: Chegada vs. Saldo")
         
-        # Engenharia de Features para o Gráfico
-        # Precisamos converter o horário de entrada (ex: 09:30) para número decimal (ex: 9.5) para plotar
         def time_to_float(t_str):
             if pd.isna(t_str): return None
             try:
@@ -359,27 +375,25 @@ with tab_analytics:
 
         df_filtered['entrada_num'] = df_filtered['entrada'].apply(time_to_float)
         
-        # Gráfico de Dispersão
         fig_scatter = px.scatter(
             df_filtered, 
             x="entrada_num", 
             y="total_trabalhado", 
             color="saldo",
-            size="total_trabalhado", # Bolinhas maiores = mais horas trabalhadas
+            size="total_trabalhado",
             hover_data=['data', 'entrada', 'saida'],
-            color_continuous_scale="RdYlGn", # Vermelho (devendo) -> Verde (crédito)
+            color_continuous_scale="RdYlGn",
             title="Sua hora de chegada influencia quanto você trabalha?",
             labels={'entrada_num': 'Hora de Chegada (Decimal)', 'total_trabalhado': 'Total Trabalhado (h)'}
         )
         
-        # Adiciona linhas de referência
         fig_scatter.add_vline(x=9.0, line_dash="dot", annotation_text="Chegada 09:00")
         fig_scatter.add_hline(y=META_DIARIA, line_dash="dot", annotation_text="Meta 8h")
         
         st.plotly_chart(fig_scatter, use_container_width=True)
-        
-        st.caption("💡 **Como ler:** Se os pontos estiverem muito espalhados na vertical, significa que sua hora de chegada não define sua produtividade. Se estiverem agrupados, você tem uma rotina rígida.")
-        # 4. STATS E BOXPLOT
+        st.caption("💡 **Como ler:** Se os pontos estiverem muito espalhados na vertical, significa que sua hora de chegada não define sua produtividade.")
+
+        # 5. STATS E BOXPLOT
         st.markdown("---")
         c_stat1, c_stat2 = st.columns([1, 2])
         with c_stat1:
