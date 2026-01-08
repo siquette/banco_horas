@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
-import datetime
 from datetime import date, time, datetime as dt, timedelta
 import holidays
 import plotly.express as px
 from io import BytesIO
-from typing import Tuple, Optional, Any
-from sqlalchemy import text # Para escrever SQL puro de forma segura
+from typing import Tuple, Optional
+from sqlalchemy import text 
 
 # --- CONFIGURAÇÕES GERAIS ---
 st.set_page_config(page_title="Gestão de Tempo Analytics", layout="wide", page_icon="📊")
@@ -15,12 +14,10 @@ META_DIARIA = 8.0
 # --- AUTENTICAÇÃO ---
 def check_password():
     """Retorna True se o usuário tiver a senha correta."""
-    
     def password_entered():
-        """Verifica se a senha digitada bate com a dos segredos."""
         if st.session_state["password"] == st.secrets["geral"]["senha_acesso"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Não armazena a senha na sessão
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -42,9 +39,10 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- CAMADA DE DADOS (NEON / POSTGRESQL) ---
+# --- CAMADA DE DADOS (POSTGRESQL / NEON) ---
+# @st.cache_resource ajuda a manter a conexão viva e evita o erro de SSL intermitente
+@st.cache_resource
 def get_db_connection():
-    """Recupera a conexão gerenciada do Streamlit"""
     return st.connection("postgresql", type="sql")
 
 def init_db():
@@ -66,7 +64,7 @@ def init_db():
         '''))
         s.commit()
 
-        # Migrações
+        # Migrações (Idempotentes)
         try:
             s.execute(text("ALTER TABLE registros ADD COLUMN extra_inicio TEXT;"))
             s.commit()
@@ -115,6 +113,7 @@ def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs,
 
 def carregar_dados():
     conn = get_db_connection()
+    # ttl=0 força recarregar os dados do banco (sem cache de dados)
     return conn.query("SELECT * FROM registros", ttl=0)
 
 def excluir_registro(data_str):
@@ -125,14 +124,12 @@ def excluir_registro(data_str):
 
 # --- FUNÇÃO HELPER (EXCEL) ---
 def to_excel(df):
-    """Gera o arquivo Excel em memória para download."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Ponto')
-        # Formatação básica automática
         worksheet = writer.sheets['Ponto']
-        worksheet.set_column('A:A', 12)  # Data
-        worksheet.set_column('B:G', 10)  # Horários
+        worksheet.set_column('A:A', 12)
+        worksheet.set_column('B:G', 10)
     return output.getvalue()
 
 # --- LÓGICA DE NEGÓCIO ---
@@ -188,7 +185,11 @@ def definir_meta(row: pd.Series) -> Tuple[float, str]:
     return META_DIARIA, "Dia Útil"
 
 # --- INTERFACE ---
-init_db()
+try:
+    init_db()
+except Exception as e:
+    st.error(f"Erro ao conectar no banco: {e}")
+    st.info("Dica: Verifique se o banco Neon está ativo ou se o secrets.toml está configurado sem 'channel_binding'.")
 
 tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
@@ -201,8 +202,15 @@ with tab_lancamento:
         with st.container(border=True):
             st.subheader("Novo Registro")
             data_sel = st.date_input("Data", date.today())
-            df_bd = carregar_dados()
-            rec = df_bd[df_bd['data'] == str(data_sel)]
+            
+            # Tratamento de erro caso o banco esteja vazio/inativo
+            try:
+                df_bd = carregar_dados()
+                rec = df_bd[df_bd['data'] == str(data_sel)] if not df_bd.empty else pd.DataFrame()
+            except:
+                df_bd = pd.DataFrame()
+                rec = pd.DataFrame()
+
             d_ent, d_sai = time(9,0), time(18,0)
             d_ai, d_av = time(12,0), time(13,0)
             d_ext_ini, d_ext_fim = time(0,0), time(0,0)
@@ -240,10 +248,8 @@ with tab_lancamento:
 
             st.markdown("---")
             with st.expander("🗑️ Excluir / Corrigir Data Errada"):
-                st.warning("Cuidado: A exclusão é permanente.")
-                df_existentes = carregar_dados()
-                if not df_existentes.empty:
-                    lista_datas = df_existentes['data'].sort_values(ascending=False).tolist()
+                if not df_bd.empty:
+                    lista_datas = df_bd['data'].sort_values(ascending=False).tolist()
                     data_para_excluir = st.selectbox("Selecione o dia para apagar:", options=lista_datas)
                     if st.button("🗑️ Apagar Registro Selecionado", type="secondary", use_container_width=True):
                         excluir_registro(data_para_excluir)
@@ -253,9 +259,8 @@ with tab_lancamento:
                     st.info("Não há registros para excluir.")
 
     with col_view:
-        df = carregar_dados()
-        if not df.empty:
-            df = processar_dataframe(df)
+        if not df_bd.empty:
+            df = processar_dataframe(df_bd)
             df[['meta', 'motivo']] = df.apply(definir_meta, axis=1, result_type='expand')
             df['saldo'] = df['total_trabalhado'] - df['meta']
             
@@ -265,7 +270,6 @@ with tab_lancamento:
             c_kpi2.metric("Total Extra (Casa)", f"{df['horas_casa'].sum():.2f} h")
             c_kpi3.metric("Dias Registrados", len(df))
             
-            # --- CORREÇÃO FEITA AQUI ---
             st.dataframe(
                 df[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo']]
                 .sort_values('data', ascending=False)
@@ -279,15 +283,14 @@ with tab_lancamento:
 
 # ---------------- ABA 2: ANALYTICS ----------------
 with tab_analytics:
-    st.header("Análise Descritiva e Tendências")
+    st.header("Análise Gerencial & BI")
     
-    df = carregar_dados()
-    if not df.empty:
-        df = processar_dataframe(df)
+    if not df_bd.empty:
+        df = processar_dataframe(df_bd)
         df[['meta', 'motivo']] = df.apply(definir_meta, axis=1, result_type='expand')
         df['saldo'] = df['total_trabalhado'] - df['meta']
         
-        st.markdown("### 🔍 Filtros de Análise")
+        st.markdown("### 🔍 Filtros")
         col_f1, col_f2 = st.columns(2)
         min_date = df['data_dt'].min().date()
         max_date = df['data_dt'].max().date()
@@ -302,35 +305,37 @@ with tab_analytics:
 
         st.markdown("---")
 
-        # 1. HEATMAP
-        st.subheader("📅 Mapa de Calor (Intensidade)")
-        df_filtered['year'] = df_filtered['data_dt'].dt.year
-        df_filtered['week'] = df_filtered['data_dt'].dt.isocalendar().week
-        df_filtered['weekday_name'] = df_filtered['data_dt'].dt.strftime("%a")
-        df_filtered['weekday_num'] = df_filtered['data_dt'].dt.weekday
+        # 1. HEATMAP MENSAL
+        st.subheader("📅 Calendário de Intensidade")
+        df_filtered['day'] = df_filtered['data_dt'].dt.day
+        df_filtered['month_name'] = df_filtered['data_dt'].dt.strftime("%B")
+        df_filtered['month_num'] = df_filtered['data_dt'].dt.month
         
-        heatmap_data = df_filtered.groupby(['week', 'weekday_num', 'weekday_name'])['total_trabalhado'].sum().reset_index()
+        heatmap_data = df_filtered.groupby(['month_num', 'month_name', 'day'])['total_trabalhado'].sum().reset_index()
+        
         fig_cal = px.density_heatmap(
-            heatmap_data, x="week", y="weekday_name", z="total_trabalhado", 
-            nbinsx=53, nbinsy=7, color_continuous_scale="Greens",
-            title="Heatmap Semanal"
+            heatmap_data, x="day", y="month_name", z="total_trabalhado", 
+            nbinsx=31, color_continuous_scale="Greens",
+            title="Mapa de Calor: Intensidade por Dia do Mês",
+            labels={'day': 'Dia', 'month_name': 'Mês', 'total_trabalhado': 'Horas'}
         )
-        days_order = ["Sun", "Sat", "Fri", "Thu", "Wed", "Tue", "Mon"]
-        fig_cal.update_yaxes(categoryorder='array', categoryarray=days_order)
+        # Correção do Import DateTime aqui
+        fig_cal.update_yaxes(categoryorder='array', categoryarray=sorted(df_filtered['month_name'].unique(), key=lambda x: dt.strptime(x, "%B").month))
+        fig_cal.update_xaxes(dtick=1)
         st.plotly_chart(fig_cal, use_container_width=True)
 
-        # 2. NOVO GRÁFICO DE BARRAS (DIÁRIO)
-        st.subheader("📊 Composição Diária (Regular + Extra)")
+        # 2. GRÁFICO DE BARRAS
+        st.subheader("📊 Composição Diária")
         df_bar = df_filtered.sort_values('data_dt')
         fig_bar = px.bar(
-            df_bar, 
-            x='data', 
-            y=['horas_escritorio', 'horas_casa'], 
-            title="Horas Diárias: Escritório vs Casa",
+            df_bar, x='data', y=['horas_escritorio', 'horas_casa'], 
+            title="Horas Diárias (Com Rótulos)",
             labels={'value': 'Horas', 'variable': 'Local', 'data': 'Data'},
-            color_discrete_map={'horas_escritorio': '#3498DB', 'horas_casa': '#E67E22'}
+            color_discrete_map={'horas_escritorio': '#3498DB', 'horas_casa': '#E67E22'},
+            text_auto='.1f'
         )
         fig_bar.add_hline(y=META_DIARIA, line_dash="dot", line_color="red", annotation_text="Meta 8h")
+        fig_bar.update_traces(textfont_size=12, textangle=0, textposition="inside", cliponaxis=False)
         fig_bar.update_layout(hovermode="x unified", barmode='stack')
         st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -363,9 +368,8 @@ with tab_analytics:
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        # 4. ANÁLISE DE COMPORTAMENTO (CORRELAÇÃO)
-        st.subheader("🧩 Padrão de Comportamento: Chegada vs. Saldo")
-        
+        # 4. COMPORTAMENTO
+        st.subheader("🧩 Padrão de Comportamento")
         def time_to_float(t_str):
             if pd.isna(t_str): return None
             try:
@@ -374,45 +378,50 @@ with tab_analytics:
             except: return None
 
         df_filtered['entrada_num'] = df_filtered['entrada'].apply(time_to_float)
-        
         fig_scatter = px.scatter(
-            df_filtered, 
-            x="entrada_num", 
-            y="total_trabalhado", 
-            color="saldo",
-            size="total_trabalhado",
-            hover_data=['data', 'entrada', 'saida'],
-            color_continuous_scale="RdYlGn",
-            title="Sua hora de chegada influencia quanto você trabalha?",
-            labels={'entrada_num': 'Hora de Chegada (Decimal)', 'total_trabalhado': 'Total Trabalhado (h)'}
+            df_filtered, x="entrada_num", y="total_trabalhado", color="saldo",
+            size="total_trabalhado", hover_data=['data'], color_continuous_scale="RdYlGn",
+            title="Chegada vs. Produtividade"
         )
-        
-        fig_scatter.add_vline(x=9.0, line_dash="dot", annotation_text="Chegada 09:00")
-        fig_scatter.add_hline(y=META_DIARIA, line_dash="dot", annotation_text="Meta 8h")
-        
+        fig_scatter.add_vline(x=9.0, line_dash="dot", annotation_text="09:00")
+        fig_scatter.add_hline(y=META_DIARIA, line_dash="dot", annotation_text="Meta")
         st.plotly_chart(fig_scatter, use_container_width=True)
-        st.caption("💡 **Como ler:** Se os pontos estiverem muito espalhados na vertical, significa que sua hora de chegada não define sua produtividade.")
 
-        # 5. STATS E BOXPLOT
         st.markdown("---")
-        c_stat1, c_stat2 = st.columns([1, 2])
-        with c_stat1:
-            st.subheader("📊 Resumo Estatístico")
-            stats = df_filtered['total_trabalhado'].describe()
-            st.markdown(f"""
-            - **Média:** {stats['mean']:.2f} h
-            - **Máx:** {stats['max']:.2f} h
-            - **Min:** {stats['min']:.2f} h
-            - **Desvio Padrão:** {stats['std']:.2f}
-            """)
-        with c_stat2:
-            st.subheader("📦 Variabilidade")
-            fig_box = px.box(
-                df_filtered, y="total_trabalhado", points="all",
-                title="Distribuição (Boxplot)"
-            )
-            fig_box.add_hline(y=META_DIARIA, line_dash="dot", annotation_text="Meta 8h")
-            st.plotly_chart(fig_box, use_container_width=True)
+        
+        # 5. VIOLIN PLOT
+        st.subheader("🎻 Distribuição por Dia (Violin)")
+        df_filtered['weekday_name'] = df_filtered['data_dt'].dt.strftime("%A")
+        dias_traducao = {
+            'Monday': 'Segunda', 'Tuesday': 'Terça', 'Wednesday': 'Quarta',
+            'Thursday': 'Quinta', 'Friday': 'Sexta', 'Saturday': 'Sábado', 'Sunday': 'Domingo'
+        }
+        df_filtered['dia_pt'] = df_filtered['weekday_name'].map(dias_traducao).fillna(df_filtered['weekday_name'])
+        ordem_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
+        
+        fig_violin = px.violin(
+            df_filtered, y="total_trabalhado", x="dia_pt", 
+            box=True, points="all", hover_data=['data'], color="dia_pt",
+            title="Densidade Semanal", category_orders={"dia_pt": ordem_dias}
+        )
+        fig_violin.add_hline(y=META_DIARIA, line_dash="dot", line_color="red")
+        st.plotly_chart(fig_violin, use_container_width=True)
+
+        # 6. TENDÊNCIA SUAVIZADA
+        st.subheader("🌊 Tendência (Média Móvel 7 Dias)")
+        df_rolling = df_filtered.sort_values('data_dt').set_index('data_dt')
+        df_rolling['media_movel_7d'] = df_rolling['total_trabalhado'].rolling(window=7, min_periods=1).mean()
+        df_rolling = df_rolling.reset_index()
+        
+        fig_trend = px.line(
+            df_rolling, x='data_dt', y=['total_trabalhado', 'media_movel_7d'],
+            title="Ruído vs. Tendência",
+            color_discrete_map={'total_trabalhado': 'lightgray', 'media_movel_7d': 'blue'}
+        )
+        fig_trend.update_traces(selector={'name': 'total_trabalhado'}, line=dict(width=1, dash='dot'))
+        fig_trend.update_traces(selector={'name': 'media_movel_7d'}, line=dict(width=4))
+        fig_trend.add_hline(y=META_DIARIA, line_color="red")
+        st.plotly_chart(fig_trend, use_container_width=True)
 
     else:
         st.info("Insira dados na aba de Lançamento.")
