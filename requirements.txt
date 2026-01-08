@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly
+holidays
+xlsxwriter
+matplotlib
+psycopg2-binary
+sqlalchemy
