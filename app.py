@@ -190,7 +190,7 @@ except Exception as e:
     # Apenas loga, não para a execução (importante para modo demo funcionar sem rede)
     print(f"Aviso conexão: {e}")
 
-# --- SIDEBAR E MODO DEMO ---
+
 # --- SIDEBAR E MODO DEMO ---
 with st.sidebar:
     st.header("⚙️ Configurações")
@@ -210,6 +210,8 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Erro ao carregar banco: {e}")
             df_bd = pd.DataFrame()
+            
+tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
 # ---------------- ABA 1: LANÇAMENTO (ATUALIZADA PARA FALTAS) ----------------
 with tab_lancamento:
@@ -525,3 +527,4 @@ with tab_analytics:
         else:
 
             st.info("Insira dados na aba de Lançamento.")
+
