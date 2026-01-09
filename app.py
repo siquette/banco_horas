@@ -211,10 +211,7 @@ with st.sidebar:
             st.error(f"Erro ao carregar banco: {e}")
             df_bd = pd.DataFrame()
 
-# --- ABAS ---
-tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
-
-# ---------------- ABA 1: LANÇAMENTO ----------------
+# ---------------- ABA 1: LANÇAMENTO (ATUALIZADA PARA FALTAS) ----------------
 with tab_lancamento:
     st.title("Apontamento Diário")
     col_input, col_view = st.columns([1, 2])
@@ -224,30 +221,60 @@ with tab_lancamento:
             st.subheader("Novo Registro")
             data_sel = st.date_input("Data", date.today())
             
+            # Recupera dados se já existirem
             if not df_bd.empty:
                 rec = df_bd[df_bd['data'] == str(data_sel)]
             else:
                 rec = pd.DataFrame()
 
+            # --- LÓGICA DE VALORES PADRÃO ---
+            # Horários padrão
             d_ent, d_sai = time(9,0), time(18,0)
             d_ai, d_av = time(12,0), time(13,0)
             d_ext_ini, d_ext_fim = time(0,0), time(0,0)
             d_feriado, d_obs = False, ""
+            d_falta = False # Novo estado padrão
 
             if not rec.empty:
                 st.info("Editando dia existente")
+                # Lógica para recuperar se foi falta (se tudo for 00:00 e obs tiver 'Falta')
+                d_obs = rec.iloc[0]['obs']
+                e_str = rec.iloc[0]['entrada']
+                s_str = rec.iloc[0]['saida']
+                
+                # Se entrada e saída forem 00:00 e não for feriado manual, é falta
+                if e_str == "00:00:00" and s_str == "00:00:00": 
+                    d_falta = True
+                
                 try: d_feriado = True if rec.iloc[0]['feriado_manual'] == 1 else False
                 except: d_feriado = False
-                d_obs = rec.iloc[0]['obs']
-                try:
-                    h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
-                    d_ext_ini = time(h, m)
-                    h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
-                    d_ext_fim = time(h, m)
-                except: pass
+                
+                # Recupera horários do banco (se não for falta)
+                if not d_falta:
+                    try:
+                        h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
+                        d_ext_ini = time(h, m)
+                        h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
+                        d_ext_fim = time(h, m)
+                        # ... recupera outros horários aqui se necessário, 
+                        # mas os inputs abaixo já pegam o padrão se não mudarmos
+                    except: pass
 
-            # Inputs (Bloqueados se for modo demo)
-            disable_inputs = modo_demo or st.checkbox("Feriado/Folga?", value=d_feriado)
+            # --- CONTROLES DE CHECKBOX ---
+            # Organizando em colunas para economizar espaço
+            ck1, ck2 = st.columns(2)
+            is_feriado = ck1.checkbox("Feriado/Folga? (Meta 0h)", value=d_feriado, help="Não desconta horas do banco.")
+            is_falta = ck2.checkbox("Falta? (Descontar 8h)", value=d_falta, help="Zera o trabalho e desconta a meta do banco.")
+
+            # --- LÓGICA DE BLOQUEIO E ZERAGEM ---
+            # Se for falta, forçamos horário zero. Se for feriado, desabilitamos.
+            disable_inputs = modo_demo or is_feriado or is_falta
+            
+            if is_falta:
+                # Força visualmente os horários para zero
+                d_ent, d_sai = time(0,0), time(0,0)
+                d_ai, d_av = time(0,0), time(0,0)
+                if d_obs == "": d_obs = "Falta injustificada / Não trabalhado"
             
             c1, c2 = st.columns(2)
             entrada = c1.time_input("Entrada", d_ent, disabled=disable_inputs)
@@ -266,6 +293,11 @@ with tab_lancamento:
                 st.info("🔒 Edição bloqueada no Modo Demo")
             else:
                 if st.button("Salvar Registro", type="primary", use_container_width=True):
+                    # Se for falta, garantimos que salvamos 00:00 no banco, independente do input
+                    if is_falta:
+                        entrada = almoco_ida = almoco_volta = saida = time(0,0)
+                        ext_ini = ext_fim = time(0,0)
+                    
                     salvar_registro(str(data_sel), entrada, almoco_ida, almoco_volta, saida, ext_ini, ext_fim, obs, disable_inputs)
                     st.toast("Registro Salvo com Sucesso!")
                     st.rerun()
@@ -292,7 +324,8 @@ with tab_lancamento:
             
             c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
             saldo_total = df['saldo'].sum()
-            c_kpi1.metric("Banco de Horas", f"{saldo_total:+.2f} h", delta_color="normal")
+            # Cor do KPI muda se estiver negativo
+            c_kpi1.metric("Banco de Horas", f"{saldo_total:+.2f} h", delta_color="normal" if saldo_total >= 0 else "inverse")
             c_kpi2.metric("Total Extra (Casa)", f"{df['horas_casa'].sum():.2f} h")
             c_kpi3.metric("Dias Registrados", len(df))
             
@@ -300,7 +333,7 @@ with tab_lancamento:
                 df[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo']]
                 .sort_values('data', ascending=False)
                 .style.format("{:.2f}", subset=['horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo'])
-                .background_gradient(subset=['saldo'], cmap='RdYlGn', vmin=-2, vmax=2),
+                .background_gradient(subset=['saldo'], cmap='RdYlGn', vmin=-8, vmax=8),
                 use_container_width=True
             )
             st.download_button("📥 Baixar Excel Completo", to_excel(df), "ponto_completo.xlsx")
@@ -490,4 +523,5 @@ with tab_analytics:
         if modo_demo:
             st.info("O modo demo está ativo, mas não gerou dados.")
         else:
+
             st.info("Insira dados na aba de Lançamento.")
