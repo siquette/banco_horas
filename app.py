@@ -75,7 +75,11 @@ with st.sidebar:
             df_bd = pd.DataFrame()
 
 # --- INTERFACE ---
-tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
+tab_lancamento, tab_analytics, tab_auditoria = st.tabs([
+    "📝 Lançamento & Extrato", 
+    "📈 Análise Gerencial (BI)",
+    "🕵️ Auditoria (Logs)"
+])
 
 # ABA 1: LANÇAMENTO (COM FLUXO DE ALTERAÇÃO INVERTIDO)
 with tab_lancamento:
@@ -524,3 +528,28 @@ with tab_analytics:
             st.info("⚠️ Sem dados no cenário selecionado.")
         else:
             st.info("👋 Insira dados na aba Lançamento.")
+
+# ABA 3: AUDITORIA (NOVA)
+with tab_auditoria:
+    st.header("🕵️ Auditoria de Dados")
+    st.markdown("Histórico de alterações e exclusões para segurança e conformidade.")
+    
+    if not modo_demo:
+        try:
+            df_logs = db.buscar_logs()
+            if not df_logs.empty:
+                # Estilização da Tabela de Logs
+                st.dataframe(
+                    df_logs.style.applymap(
+                        lambda v: 'color: red; font-weight: bold;' if v == 'EXCLUIR' else 'color: green;', 
+                        subset=['acao']
+                    ),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Nenhum evento de auditoria registrado ainda.")
+        except Exception as e:
+            st.error(f"Erro ao buscar logs: {e}")
+    else:
+        st.warning("⚠️ Auditoria não disponível no modo DEMO.")

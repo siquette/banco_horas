@@ -7,9 +7,10 @@ def get_db_connection():
     return st.connection("postgresql", type="sql")
 
 def init_db():
-    """Inicializa a tabela e roda migrações se necessário."""
+    """Inicializa tabelas (Dados + Auditoria) e roda migrações."""
     conn = get_db_connection()
     with conn.session as s:
+        # 1. Tabela Principal
         s.execute(text('''
             CREATE TABLE IF NOT EXISTS registros (
                 data TEXT PRIMARY KEY,
@@ -24,6 +25,18 @@ def init_db():
                 home_office INTEGER DEFAULT 0
             );
         '''))
+        
+        # 2. Tabela de Auditoria (NOVA)
+        s.execute(text('''
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id SERIAL PRIMARY KEY,
+                data_evento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                acao TEXT,          -- 'SALVAR', 'EXCLUIR'
+                data_registro TEXT, -- Qual dia foi afetado
+                detalhes TEXT       -- Msg descritiva
+            );
+        '''))
+        
         s.commit()
         
         # Migrações silenciosas
@@ -44,6 +57,7 @@ def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs,
     feriado_int = 1 if is_feriado else 0
     home_office_int = 1 if is_home_office else 0
     
+    # Lógica de Upsert
     sql = text('''
         INSERT INTO registros (data, entrada, almoco_ida, almoco_volta, saida, extra_inicio, extra_fim, obs, feriado_manual, home_office)
         VALUES (:data, :ent, :ai, :av, :sai, :ei, :ef, :obs, :fer, :ho)
@@ -66,18 +80,37 @@ def salvar_registro(data, entrada, a_ida, a_volta, saida, ext_ini, ext_fim, obs,
     
     with conn.session as s:
         s.execute(sql, params)
+        
+        # [AUDITORIA] Grava o rastro
+        s.execute(text('''
+            INSERT INTO audit_logs (acao, data_registro, detalhes)
+            VALUES ('SALVAR', :d, 'Usuário criou ou atualizou este registro.')
+        '''), {'d': data})
+        
         s.commit()
     
-    # Limpa o cache do Streamlit para atualizar os gráficos na hora
+    st.cache_data.clear()
+
+def excluir_registro(data_str):
+    conn = get_db_connection()
+    with conn.session as s:
+        s.execute(text("DELETE FROM registros WHERE data = :d"), {"d": data_str})
+        
+        # [AUDITORIA] Grava o rastro da exclusão
+        s.execute(text('''
+            INSERT INTO audit_logs (acao, data_registro, detalhes)
+            VALUES ('EXCLUIR', :d, 'Registro apagado permanentemente.')
+        '''), {'d': data_str})
+        
+        s.commit()
     st.cache_data.clear()
 
 def carregar_dados():
     conn = get_db_connection()
     return conn.query("SELECT * FROM registros", ttl=0)
 
-def excluir_registro(data_str):
+# Nova função para ler a auditoria
+def buscar_logs():
     conn = get_db_connection()
-    with conn.session as s:
-        s.execute(text("DELETE FROM registros WHERE data = :d"), {"d": data_str})
-        s.commit()
-    st.cache_data.clear()
+    # Pega os últimos 100 eventos (do mais recente pro mais antigo)
+    return conn.query("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100", ttl=0)
