@@ -77,35 +77,48 @@ with st.sidebar:
 # --- INTERFACE ---
 tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
-# ABA 1: LANÇAMENTO (CORRIGIDA PARA EDIÇÃO FUNCIONAR)
+# ABA 1: LANÇAMENTO (COM FLUXO DE ALTERAÇÃO INVERTIDO)
 with tab_lancamento:
     st.title("Apontamento Diário")
     col_input, col_view = st.columns([1, 2])
     
     with col_input:
         with st.container(border=True):
-            st.subheader("Novo Registro")
+            st.subheader("Registro")
             
-            # [REGRA DE UX] O Seletor de Data deve ficar FORA do formulário.
-            # Motivo: Quando o usuário troca a data, queremos que a página recarregue 
-            # IMEDIATAMENTE para buscar os dados daquele dia no banco (funcionalidade de Editar).
-            data_sel = st.date_input("Data do Registro", date.today())
-            
-            # Busca dados existentes para essa data (Lógica de Edição)
+            # --- GESTÃO DE ESTADO (MEMÓRIA) ---
+            # Verifica se o usuário pediu para carregar uma data específica pelo botão lá de baixo
+            if 'data_ativa' not in st.session_state:
+                st.session_state.data_ativa = date.today()
+
+            # --- INPUT DE DATA (Topo) ---
+            # Se o usuário mudar aqui manualmente, atualizamos a memória
+            data_sel = st.date_input(
+                "Data do Registro", 
+                value=st.session_state.data_ativa,
+                key="input_data_principal"
+            )
+            # Sincroniza o estado caso o usuário mude manualmente no calendário
+            st.session_state.data_ativa = data_sel
+
+            # --- CARREGAMENTO DE DADOS (READ) ---
             rec = pd.DataFrame()
             if not df_bd.empty:
                 rec = df_bd[df_bd['data'] == str(data_sel)]
 
-            # Defaults (Valores Padrão)
+            # Defaults (Padrão: Vazio/Zero)
             d_ent, d_sai = time(9,0), time(18,0)
             d_ai, d_av = time(12,0), time(13,0)
             d_ext_ini, d_ext_fim = time(0,0), time(0,0)
             d_feriado, d_home_office, d_obs = False, False, ""
             d_falta = False
 
-            # Se encontrou registro, atualiza os defaults (Isso é o que permite Editar!)
+            # Se encontrou dados no banco, preenche as variáveis (Lógica de Edição)
+            modo_edicao = False
             if not rec.empty:
-                st.info(f"✏️ Editando registro de: {data_sel.strftime('%d/%m/%Y')}")
+                modo_edicao = True
+                st.info(f"✏️ Editando dados carregados de: {data_sel.strftime('%d/%m/%Y')}")
+                
                 d_obs = rec.iloc[0]['obs']
                 e_str, s_str = rec.iloc[0]['entrada'], rec.iloc[0]['saida']
                 
@@ -124,49 +137,42 @@ with tab_lancamento:
                         d_ext_fim = time(h, m)
                     except: pass
             
-            # [PERFORMANCE] O Formulário começa AQUI (Inputs pesados)
+            # --- FORMULÁRIO ---
             with st.form(key="form_lancamento", clear_on_submit=False):
-                
-                # Inputs Visuais
                 ck1, ck2, ck3 = st.columns(3)
-                is_feriado = ck1.checkbox("Feriado?", value=d_feriado, help="Zera a meta do dia")
-                is_falta = ck2.checkbox("Falta?", value=d_falta, help="Considera 0h trabalhadas")
+                is_feriado = ck1.checkbox("Feriado?", value=d_feriado)
+                is_falta = ck2.checkbox("Falta?", value=d_falta)
                 is_home_office = ck3.checkbox("🏠 Home Office", value=d_home_office)
 
                 c1, c2 = st.columns(2)
-                entrada = c1.time_input("Entrada", d_ent)
-                saida = c2.time_input("Saída", d_sai)
+                entrada = c1.time_input("Entrada", value=d_ent)
+                saida = c2.time_input("Saída", value=d_sai)
                 
                 c3, c4 = st.columns(2)
-                almoco_ida = c3.time_input("Almoço Ida", d_ai)
-                almoco_volta = c4.time_input("Almoço Volta", d_av)
+                almoco_ida = c3.time_input("Almoço Ida", value=d_ai)
+                almoco_volta = c4.time_input("Almoço Volta", value=d_av)
                 
                 st.markdown("---")
-                st.caption("Trabalho Extra")
+                st.caption("Horas Extras")
                 c5, c6 = st.columns(2)
-                ext_ini = c5.time_input("Início Extra", d_ext_ini)
-                ext_fim = c6.time_input("Fim Extra", d_ext_fim)
+                ext_ini = c5.time_input("Início Extra", value=d_ext_ini)
+                ext_fim = c6.time_input("Fim Extra", value=d_ext_fim)
                 
                 obs = st.text_area("Observações", value=d_obs, height=68)
                 
-                # Botão de Salvar
-                submitted = st.form_submit_button("💾 Salvar Registro", type="primary", use_container_width=True, disabled=modo_demo)
+                # O texto do botão muda para dar feedback visual
+                txt_botao = "💾 Atualizar Registro" if modo_edicao else "💾 Salvar Novo Registro"
+                submitted = st.form_submit_button(txt_botao, type="primary", use_container_width=True, disabled=modo_demo)
                 
                 if submitted and not modo_demo:
-                    # 1. Validação (Guardião)
                     dados_validos, msg_erro = ut.validar_registro(entrada, almoco_ida, almoco_volta, saida, is_falta)
                     
                     if not dados_validos:
                         st.error(msg_erro)
                     else:
-                        # 2. Preparação
                         if is_falta:
-                            entrada_salvar = time(0,0)
-                            almoco_ida_salvar = time(0,0)
-                            almoco_volta_salvar = time(0,0)
-                            saida_salvar = time(0,0)
-                            ext_ini_salvar = time(0,0)
-                            ext_fim_salvar = time(0,0)
+                            entrada_salvar = almoco_ida_salvar = almoco_volta_salvar = saida_salvar = time(0,0)
+                            ext_ini_salvar = ext_fim_salvar = time(0,0)
                         else:
                             entrada_salvar = entrada
                             almoco_ida_salvar = almoco_ida
@@ -175,20 +181,43 @@ with tab_lancamento:
                             ext_ini_salvar = ext_ini
                             ext_fim_salvar = ext_fim
 
-                        # 3. Upsert (Salvar ou Atualizar)
                         db.salvar_registro(
                             str(data_sel), entrada_salvar, almoco_ida_salvar, almoco_volta_salvar, saida_salvar, 
                             ext_ini_salvar, ext_fim_salvar, obs, is_feriado, is_home_office
                         )
-                        st.toast("✅ Registro salvo/atualizado com sucesso!", icon="💾")
+                        st.toast("✅ Registro salvo com sucesso!", icon="💾")
                         st.rerun()
 
-            # Área de exclusão fora do form
+            # --- ÁREA DE GESTÃO (ALTERAR E EXCLUIR) ---
+            # Aqui atendemos seu pedido: "Alterar" fica embaixo, igual ao "Excluir"
             if not df_bd.empty and not modo_demo:
-                 with st.expander("🗑️ Área de Perigo (Excluir)"):
+                st.write("") # Espaçamento
+                
+                # OPÇÃO 1: ALTERAR (CARREGAR)
+                with st.expander("✏️ Procurar e Alterar Registro"):
+                    # Lista de datas disponíveis no banco
+                    lista_datas_banco = df_bd['data'].sort_values(ascending=False).tolist()
+                    
+                    c_sel_alt, c_btn_alt = st.columns([3, 1])
+                    dt_alterar_str = c_sel_alt.selectbox("Selecione a data para editar:", options=lista_datas_banco, key="sel_alterar")
+                    
+                    # Botão que joga a data lá para cima
+                    if c_btn_alt.button("Carregar", use_container_width=True):
+                        # Converte string do banco para objeto date
+                        ano, mes, dia = map(int, dt_alterar_str.split('-'))
+                        nova_data = date(ano, mes, dia)
+                        
+                        # Atualiza a memória e recarrega a página
+                        st.session_state.data_ativa = nova_data
+                        st.rerun()
+
+                # OPÇÃO 2: EXCLUIR
+                with st.expander("🗑️ Excluir Registro"):
                     lista_datas = df_bd['data'].sort_values(ascending=False).tolist()
-                    dt_del = st.selectbox("Apagar dia:", options=lista_datas)
-                    if st.button("Confirmar Exclusão", type="secondary", use_container_width=True):
+                    c_sel_del, c_btn_del = st.columns([3, 1])
+                    dt_del = c_sel_del.selectbox("Apagar dia:", options=lista_datas, key="sel_excluir")
+                    
+                    if c_btn_del.button("Confirmar", type="secondary", use_container_width=True):
                         db.excluir_registro(dt_del)
                         st.rerun()
 
