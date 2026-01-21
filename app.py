@@ -221,7 +221,8 @@ with tab_lancamento:
                         db.excluir_registro(dt_del)
                         st.rerun()
 
-with col_view:
+# --- LADO DIREITO (VISUALIZAÇÃO & KPIs) ---
+    with col_view:
         if not df_bd.empty:
             df = ut.processar_dataframe(df_bd)
             df[['meta', 'motivo']] = df.apply(ut.definir_meta, axis=1, result_type='expand')
@@ -258,7 +259,7 @@ with col_view:
             
             st.markdown("---")
             
-            # Preparação Visual da Tabela
+            # Tabela Visual
             df_display = df.copy()
             def icone_motivo(m):
                 if "Domingo" in m or "Feriado" in m: return "🔴 " + m
@@ -266,15 +267,23 @@ with col_view:
                 return "🔵 " + m
             df_display['motivo_visual'] = df_display['motivo'].apply(icone_motivo)
 
-            # [MELHORIA UX] Renomeando colunas para português amigável
-            df_final = df_display[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo_visual', 'obs']].rename(columns={
+            # [MELHORIA UX] Adicionando Entrada e Saída na Tabela
+            colunas_visuais = [
+                'data', 'entrada', 'saida', # <--- NOVAS COLUNAS AQUI
+                'horas_escritorio', 'horas_casa', 'total_trabalhado', 
+                'saldo', 'motivo_visual', 'obs'
+            ]
+            
+            df_final = df_display[colunas_visuais].rename(columns={
                 'data': 'Data',
+                'entrada': 'Entrada',   # Renomeando
+                'saida': 'Saída',       # Renomeando
                 'horas_escritorio': 'Escritório',
                 'horas_casa': 'Casa',
                 'total_trabalhado': 'Total',
                 'saldo': 'Saldo',
-                'motivo_visual': 'Status',   # Renomeado de motivo_visual
-                'obs': 'Observações'         # A nova coluna pedida!
+                'motivo_visual': 'Status',
+                'obs': 'Observações'
             })
 
             st.dataframe(
@@ -282,7 +291,7 @@ with col_view:
                 .style.format("{:.2f}", subset=['Escritório', 'Casa', 'Total', 'Saldo'])
                 .background_gradient(subset=['Saldo'], cmap='RdYlGn', vmin=-8, vmax=8),
                 use_container_width=True,
-                hide_index=True # Esconde o índice numérico (0, 1, 2...) que não serve pra nada
+                hide_index=True
             )
             st.download_button("📥 Excel", ut.to_excel(df), "ponto.xlsx")
         else:
@@ -367,11 +376,13 @@ with tab_analytics:
             st.subheader("📊 Histórico Detalhado")
             legendas = {'horas_escritorio': 'Escritório', 'horas_casa': 'Casa (HO+Extra)', 'data': 'Data', 'value': 'Horas', 'motivo_dia': 'Tipo de Dia'}
             
+            # [MELHORIA UX] Adicionando Entrada e Saída no Tooltip (Hover)
             fig_bar = px.bar(
                 df_filtered.sort_values('data_dt'), x='data', y=['horas_escritorio', 'horas_casa'], 
                 labels=legendas,
                 color_discrete_map={'horas_escritorio': '#3498DB', 'horas_casa': '#E67E22'},
-                hover_data=['motivo_dia'], 
+                # Agora o mouse mostra Entrada, Saída e o Motivo
+                hover_data=['entrada', 'saida', 'motivo_dia'], 
                 text_auto='.2f'
             )
             fig_bar.add_hline(y=ut.META_DIARIA, line_dash="dot", line_color="red", annotation_text="Meta 8h")
