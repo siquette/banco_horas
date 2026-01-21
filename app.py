@@ -77,7 +77,7 @@ with st.sidebar:
 # --- INTERFACE ---
 tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
-# ABA 1: LANÇAMENTO (OTIMIZADA COM ST.FORM)
+# ABA 1: LANÇAMENTO (CORRIGIDA PARA EDIÇÃO FUNCIONAR)
 with tab_lancamento:
     st.title("Apontamento Diário")
     col_input, col_view = st.columns([1, 2])
@@ -86,47 +86,47 @@ with tab_lancamento:
         with st.container(border=True):
             st.subheader("Novo Registro")
             
-            # [PERFORMANCE UX] 
-            # Tudo dentro do st.form não causa reload da página até clicar no botão Submit.
+            # [REGRA DE UX] O Seletor de Data deve ficar FORA do formulário.
+            # Motivo: Quando o usuário troca a data, queremos que a página recarregue 
+            # IMEDIATAMENTE para buscar os dados daquele dia no banco (funcionalidade de Editar).
+            data_sel = st.date_input("Data do Registro", date.today())
+            
+            # Busca dados existentes para essa data (Lógica de Edição)
+            rec = pd.DataFrame()
+            if not df_bd.empty:
+                rec = df_bd[df_bd['data'] == str(data_sel)]
+
+            # Defaults (Valores Padrão)
+            d_ent, d_sai = time(9,0), time(18,0)
+            d_ai, d_av = time(12,0), time(13,0)
+            d_ext_ini, d_ext_fim = time(0,0), time(0,0)
+            d_feriado, d_home_office, d_obs = False, False, ""
+            d_falta = False
+
+            # Se encontrou registro, atualiza os defaults (Isso é o que permite Editar!)
+            if not rec.empty:
+                st.info(f"✏️ Editando registro de: {data_sel.strftime('%d/%m/%Y')}")
+                d_obs = rec.iloc[0]['obs']
+                e_str, s_str = rec.iloc[0]['entrada'], rec.iloc[0]['saida']
+                
+                if e_str == "00:00:00" and s_str == "00:00:00": d_falta = True
+                
+                try: d_feriado = True if rec.iloc[0]['feriado_manual'] == 1 else False
+                except: pass
+                try: d_home_office = True if rec.iloc[0]['home_office'] == 1 else False
+                except: pass
+                
+                if not d_falta:
+                    try:
+                        h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
+                        d_ext_ini = time(h, m)
+                        h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
+                        d_ext_fim = time(h, m)
+                    except: pass
+            
+            # [PERFORMANCE] O Formulário começa AQUI (Inputs pesados)
             with st.form(key="form_lancamento", clear_on_submit=False):
                 
-                # 1. Seleção de Data
-                data_sel = st.date_input("Data do Registro", date.today())
-                
-                # Buscando dados prévios (apenas para preencher defaults se existirem)
-                # Nota: Dentro do form, isso roda na renderização inicial, não a cada clique.
-                rec = pd.DataFrame()
-                if not df_bd.empty:
-                    rec = df_bd[df_bd['data'] == str(data_sel)]
-
-                # Defaults iniciais
-                d_ent, d_sai = time(9,0), time(18,0)
-                d_ai, d_av = time(12,0), time(13,0)
-                d_ext_ini, d_ext_fim = time(0,0), time(0,0)
-                d_feriado, d_home_office, d_obs = False, False, ""
-                d_falta = False
-
-                # Se já existe registro, carrega os valores
-                if not rec.empty:
-                    st.caption(f"✏️ Editando registro existente de: {data_sel.strftime('%d/%m/%Y')}")
-                    d_obs = rec.iloc[0]['obs']
-                    e_str, s_str = rec.iloc[0]['entrada'], rec.iloc[0]['saida']
-                    
-                    if e_str == "00:00:00" and s_str == "00:00:00": d_falta = True
-                    
-                    try: d_feriado = True if rec.iloc[0]['feriado_manual'] == 1 else False
-                    except: pass
-                    try: d_home_office = True if rec.iloc[0]['home_office'] == 1 else False
-                    except: pass
-                    
-                    if not d_falta:
-                        try:
-                            h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
-                            d_ext_ini = time(h, m)
-                            h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
-                            d_ext_fim = time(h, m)
-                        except: pass
-
                 # Inputs Visuais
                 ck1, ck2, ck3 = st.columns(3)
                 is_feriado = ck1.checkbox("Feriado?", value=d_feriado, help="Zera a meta do dia")
@@ -149,18 +149,17 @@ with tab_lancamento:
                 
                 obs = st.text_area("Observações", value=d_obs, height=68)
                 
-                # [BOTÃO DE AÇÃO]
-                # O script só roda daqui para baixo quando isso for clicado
+                # Botão de Salvar
                 submitted = st.form_submit_button("💾 Salvar Registro", type="primary", use_container_width=True, disabled=modo_demo)
                 
                 if submitted and not modo_demo:
-                    # 1. Chama o Guardião de Integridade
+                    # 1. Validação (Guardião)
                     dados_validos, msg_erro = ut.validar_registro(entrada, almoco_ida, almoco_volta, saida, is_falta)
                     
                     if not dados_validos:
-                        st.error(msg_erro) # Mostra o erro vermelho berrante
+                        st.error(msg_erro)
                     else:
-                        # 2. Se passou, prepara os dados
+                        # 2. Preparação
                         if is_falta:
                             entrada_salvar = time(0,0)
                             almoco_ida_salvar = time(0,0)
@@ -176,15 +175,15 @@ with tab_lancamento:
                             ext_ini_salvar = ext_ini
                             ext_fim_salvar = ext_fim
 
-                        # 3. Salva no Banco
+                        # 3. Upsert (Salvar ou Atualizar)
                         db.salvar_registro(
                             str(data_sel), entrada_salvar, almoco_ida_salvar, almoco_volta_salvar, saida_salvar, 
                             ext_ini_salvar, ext_fim_salvar, obs, is_feriado, is_home_office
                         )
-                        st.toast("✅ Registro salvo com sucesso!", icon="💾")
+                        st.toast("✅ Registro salvo/atualizado com sucesso!", icon="💾")
                         st.rerun()
 
-            # Área de exclusão fora do form (pois é destrutiva e precisa de confirmação imediata)
+            # Área de exclusão fora do form
             if not df_bd.empty and not modo_demo:
                  with st.expander("🗑️ Área de Perigo (Excluir)"):
                     lista_datas = df_bd['data'].sort_values(ascending=False).tolist()
