@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 from datetime import date, time
 
 # --- IMPORTAÇÕES MODULARES ---
-# Agora importamos as funções dos arquivos que criamos
 import database as db
 import utils as ut
 from mock_data import gerar_dados_ficticios
@@ -37,7 +36,7 @@ if not check_password():
 try:
     db.init_db()
 except Exception as e:
-    print(f"Aviso conexão: {e}")
+    st.error(f"Erro de conexão: {e}")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -49,7 +48,7 @@ with st.sidebar:
             "📂 Banco Real (Neon)", 
             "🧪 Demo: Superávit (+)", 
             "🧪 Demo: Déficit (-)",
-            "🔥 Demo: Feriado & FDS (Stress)" # <--- NOVO BOTÃO
+            "🔥 Demo: Feriado & FDS (Stress)"
         ),
         help="Escolha entre dados reais ou cenários simulados."
     )
@@ -58,13 +57,15 @@ with st.sidebar:
         modo_demo = True
         st.warning(f"⚠️ Visualizando: {tipo_dados}")
         
-        # Mapeamento do nome do botão para o código da função
         if "Superávit" in tipo_dados: cenario_escolhido = "superavit"
         elif "Déficit" in tipo_dados: cenario_escolhido = "deficit"
-        else: cenario_escolhido = "teste_feriado" # <--- Mapeia o novo cenário
+        else: cenario_escolhido = "teste_feriado"
         
         df_bd = gerar_dados_ficticios(cenario_escolhido)
-        st.cache_data.clear() 
+        # Limpa cache apenas se mudar o cenário
+        if "ultimo_cenario" not in st.session_state or st.session_state.ultimo_cenario != cenario_escolhido:
+             st.cache_data.clear()
+             st.session_state.ultimo_cenario = cenario_escolhido
     else:
         modo_demo = False
         try:
@@ -76,7 +77,7 @@ with st.sidebar:
 # --- INTERFACE ---
 tab_lancamento, tab_analytics = st.tabs(["📝 Lançamento & Extrato", "📈 Análise Gerencial (BI)"])
 
-# ABA 1: LANÇAMENTO
+# ABA 1: LANÇAMENTO (OTIMIZADA COM ST.FORM)
 with tab_lancamento:
     st.title("Apontamento Diário")
     col_input, col_view = st.columns([1, 2])
@@ -84,80 +85,111 @@ with tab_lancamento:
     with col_input:
         with st.container(border=True):
             st.subheader("Novo Registro")
-            data_sel = st.date_input("Data", date.today())
             
-            if not df_bd.empty:
-                rec = df_bd[df_bd['data'] == str(data_sel)]
-            else:
+            # [PERFORMANCE UX] 
+            # Tudo dentro do st.form não causa reload da página até clicar no botão Submit.
+            with st.form(key="form_lancamento", clear_on_submit=False):
+                
+                # 1. Seleção de Data
+                data_sel = st.date_input("Data do Registro", date.today())
+                
+                # Buscando dados prévios (apenas para preencher defaults se existirem)
+                # Nota: Dentro do form, isso roda na renderização inicial, não a cada clique.
                 rec = pd.DataFrame()
+                if not df_bd.empty:
+                    rec = df_bd[df_bd['data'] == str(data_sel)]
 
-            # Defaults
-            d_ent, d_sai = time(9,0), time(18,0)
-            d_ai, d_av = time(12,0), time(13,0)
-            d_ext_ini, d_ext_fim = time(0,0), time(0,0)
-            d_feriado, d_home_office, d_obs = False, False, ""
-            d_falta = False
+                # Defaults iniciais
+                d_ent, d_sai = time(9,0), time(18,0)
+                d_ai, d_av = time(12,0), time(13,0)
+                d_ext_ini, d_ext_fim = time(0,0), time(0,0)
+                d_feriado, d_home_office, d_obs = False, False, ""
+                d_falta = False
 
-            if not rec.empty:
-                st.info("Editando dia existente")
-                d_obs = rec.iloc[0]['obs']
-                e_str, s_str = rec.iloc[0]['entrada'], rec.iloc[0]['saida']
-                
-                if e_str == "00:00:00" and s_str == "00:00:00": d_falta = True
-                
-                try: d_feriado = True if rec.iloc[0]['feriado_manual'] == 1 else False
-                except: pass
-                try: d_home_office = True if rec.iloc[0]['home_office'] == 1 else False
-                except: pass
-                
-                if not d_falta:
-                    try:
-                        h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
-                        d_ext_ini = time(h, m)
-                        h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
-                        d_ext_fim = time(h, m)
-                    except: pass
-
-            ck1, ck2, ck3 = st.columns(3)
-            is_feriado = ck1.checkbox("Feriado?", value=d_feriado, help="Meta 0h")
-            is_falta = ck2.checkbox("Falta?", value=d_falta, help="Desconta 8h")
-            is_home_office = ck3.checkbox("🏠 Home Office", value=d_home_office, help="Jornada feita de casa")
-
-            disable_inputs = modo_demo or is_feriado or is_falta
-            
-            if is_falta:
-                d_ent, d_sai, d_ai, d_av = time(0,0), time(0,0), time(0,0), time(0,0)
-                if d_obs == "": d_obs = "Falta"
-            
-            c1, c2 = st.columns(2)
-            entrada = c1.time_input("Entrada", d_ent, disabled=disable_inputs)
-            saida = c2.time_input("Saída", d_sai, disabled=disable_inputs)
-            c3, c4 = st.columns(2)
-            almoco_ida = c3.time_input("Almoço Ida", d_ai, disabled=disable_inputs)
-            almoco_volta = c4.time_input("Almoço Volta", d_av, disabled=disable_inputs)
-            
-            st.caption("Trabalho Extra")
-            c5, c6 = st.columns(2)
-            ext_ini = c5.time_input("Início Extra", d_ext_ini, disabled=modo_demo)
-            ext_fim = c6.time_input("Fim Extra", d_ext_fim, disabled=modo_demo)
-            obs = st.text_area("Obs", value=d_obs, height=68, disabled=modo_demo)
-            
-            if not modo_demo:
-                if st.button("Salvar Registro", type="primary", use_container_width=True):
-                    if is_falta:
-                        entrada = almoco_ida = almoco_volta = saida = time(0,0)
-                        ext_ini = ext_fim = time(0,0)
+                # Se já existe registro, carrega os valores
+                if not rec.empty:
+                    st.caption(f"✏️ Editando registro existente de: {data_sel.strftime('%d/%m/%Y')}")
+                    d_obs = rec.iloc[0]['obs']
+                    e_str, s_str = rec.iloc[0]['entrada'], rec.iloc[0]['saida']
                     
-                    db.salvar_registro(str(data_sel), entrada, almoco_ida, almoco_volta, saida, ext_ini, ext_fim, obs, is_feriado, is_home_office)
-                    st.toast("Registro salvo e Dashboard atualizado!", icon="✅")
-                    st.rerun()
+                    if e_str == "00:00:00" and s_str == "00:00:00": d_falta = True
+                    
+                    try: d_feriado = True if rec.iloc[0]['feriado_manual'] == 1 else False
+                    except: pass
+                    try: d_home_office = True if rec.iloc[0]['home_office'] == 1 else False
+                    except: pass
+                    
+                    if not d_falta:
+                        try:
+                            h, m, s = map(int, rec.iloc[0]['extra_inicio'].split(':'))
+                            d_ext_ini = time(h, m)
+                            h, m, s = map(int, rec.iloc[0]['extra_fim'].split(':'))
+                            d_ext_fim = time(h, m)
+                        except: pass
 
-            st.markdown("---")
-            with st.expander("🗑️ Excluir"):
-                if not df_bd.empty and not modo_demo:
+                # Inputs Visuais
+                ck1, ck2, ck3 = st.columns(3)
+                is_feriado = ck1.checkbox("Feriado?", value=d_feriado, help="Zera a meta do dia")
+                is_falta = ck2.checkbox("Falta?", value=d_falta, help="Considera 0h trabalhadas")
+                is_home_office = ck3.checkbox("🏠 Home Office", value=d_home_office)
+
+                c1, c2 = st.columns(2)
+                entrada = c1.time_input("Entrada", d_ent)
+                saida = c2.time_input("Saída", d_sai)
+                
+                c3, c4 = st.columns(2)
+                almoco_ida = c3.time_input("Almoço Ida", d_ai)
+                almoco_volta = c4.time_input("Almoço Volta", d_av)
+                
+                st.markdown("---")
+                st.caption("Trabalho Extra")
+                c5, c6 = st.columns(2)
+                ext_ini = c5.time_input("Início Extra", d_ext_ini)
+                ext_fim = c6.time_input("Fim Extra", d_ext_fim)
+                
+                obs = st.text_area("Observações", value=d_obs, height=68)
+                
+                # [BOTÃO DE AÇÃO]
+                # O script só roda daqui para baixo quando isso for clicado
+                submitted = st.form_submit_button("💾 Salvar Registro", type="primary", use_container_width=True, disabled=modo_demo)
+                
+                if submitted and not modo_demo:
+                    # 1. Chama o Guardião de Integridade
+                    dados_validos, msg_erro = ut.validar_registro(entrada, almoco_ida, almoco_volta, saida, is_falta)
+                    
+                    if not dados_validos:
+                        st.error(msg_erro) # Mostra o erro vermelho berrante
+                    else:
+                        # 2. Se passou, prepara os dados
+                        if is_falta:
+                            entrada_salvar = time(0,0)
+                            almoco_ida_salvar = time(0,0)
+                            almoco_volta_salvar = time(0,0)
+                            saida_salvar = time(0,0)
+                            ext_ini_salvar = time(0,0)
+                            ext_fim_salvar = time(0,0)
+                        else:
+                            entrada_salvar = entrada
+                            almoco_ida_salvar = almoco_ida
+                            almoco_volta_salvar = almoco_volta
+                            saida_salvar = saida
+                            ext_ini_salvar = ext_ini
+                            ext_fim_salvar = ext_fim
+
+                        # 3. Salva no Banco
+                        db.salvar_registro(
+                            str(data_sel), entrada_salvar, almoco_ida_salvar, almoco_volta_salvar, saida_salvar, 
+                            ext_ini_salvar, ext_fim_salvar, obs, is_feriado, is_home_office
+                        )
+                        st.toast("✅ Registro salvo com sucesso!", icon="💾")
+                        st.rerun()
+
+            # Área de exclusão fora do form (pois é destrutiva e precisa de confirmação imediata)
+            if not df_bd.empty and not modo_demo:
+                 with st.expander("🗑️ Área de Perigo (Excluir)"):
                     lista_datas = df_bd['data'].sort_values(ascending=False).tolist()
                     dt_del = st.selectbox("Apagar dia:", options=lista_datas)
-                    if st.button("🗑️ Confirmar Exclusão", use_container_width=True):
+                    if st.button("Confirmar Exclusão", type="secondary", use_container_width=True):
                         db.excluir_registro(dt_del)
                         st.rerun()
 
@@ -167,68 +199,38 @@ with col_view:
             df[['meta', 'motivo']] = df.apply(ut.definir_meta, axis=1, result_type='expand')
             df['saldo'] = df['total_trabalhado'] - df['meta']
             
-            # --- CÁLCULOS DOS KPIS ---
+            # KPI Calculations
             saldo_total = df['saldo'].sum()
             dias_folga = saldo_total / 8.0
             
-            # [KPIs DE FLUXO]
-            # Créditos (Lado Positivo)
             credito_casa = df['extra_casa'].sum()
             credito_escritorio = df['extra_escritorio'].sum()
             total_creditos = credito_casa + credito_escritorio
-            
-            # Débitos (Lado Negativo - Dias que você ficou devendo)
-            # Somamos apenas os saldos negativos
             total_debitos = df[df['saldo'] < 0]['saldo'].sum()
-            
-            # Horas Premium (Sacrifício FDS/Feriado)
             horas_premium = df[df['meta'] == 0]['total_trabalhado'].sum()
             
             media_dia = df[df['total_trabalhado'] > 0]['total_trabalhado'].mean()
             if pd.isna(media_dia): media_dia = 0.0
 
-            # --- LAYOUT CONTÁBIL (Crédito vs Débito) ---
+            # Layout Contábil
             st.markdown("### 🎯 Balanço de Horas")
-            
-            # LINHA 1: O Resumo Financeiro
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric(
-                "💰 Saldo Líquido", 
-                f"{saldo_total:+.2f} h", 
-                delta_color="normal" if saldo_total >= 0 else "inverse",
-                help="Resultado Final: (Extras Casa + Extras Escritório) - Débitos"
-            )
-            k2.metric(
-                "📈 Total Ganhos", 
-                f"+{total_creditos:.2f} h",
-                delta_color="normal",
-                help="Soma bruta de todas as horas extras feitas."
-            )
-            k3.metric(
-                "📉 Total Débitos", 
-                f"{total_debitos:.2f} h",
-                delta_color="inverse", # Fica vermelho
-                help="Soma de todos os atrasos e faltas que descontaram do seu banco."
-            )
-            k4.metric(
-                "🏖️ Dias de Folga", 
-                f"{dias_folga:+.1f} dias",
-                help="Seu saldo líquido convertido em dias de 8h."
-            )
+            k1.metric("💰 Saldo Líquido", f"{saldo_total:+.2f} h", delta_color="normal" if saldo_total >= 0 else "inverse")
+            k2.metric("📈 Total Ganhos", f"+{total_creditos:.2f} h", delta_color="normal")
+            k3.metric("📉 Total Débitos", f"{total_debitos:.2f} h", delta_color="inverse")
+            k4.metric("🏖️ Dias de Folga", f"{dias_folga:+.1f} dias")
             
             st.markdown("---")
             st.markdown("### 📊 Detalhamento da Origem")
-            
-            # LINHA 2: A Origem do Esforço
             d1, d2, d3, d4 = st.columns(4)
-            d1.metric("🏠 Extra (Casa)", f"{credito_casa:.2f} h", help="Lucro gerado em Home Office")
-            d2.metric("🏢 Extra (Escritório)", f"{credito_escritorio:.2f} h", help="Lucro gerado no Presencial")
-            d3.metric("🔥 Plantões (FDS)", f"{horas_premium:.2f} h", help="Horas trabalhadas em dias de folga")
+            d1.metric("🏠 Extra (Casa)", f"{credito_casa:.2f} h")
+            d2.metric("🏢 Extra (Escritório)", f"{credito_escritorio:.2f} h")
+            d3.metric("🔥 Plantões (FDS)", f"{horas_premium:.2f} h")
             d4.metric("⏱️ Média Diária", f"{media_dia:.2f} h")
             
             st.markdown("---")
             
-            # Tabela Visual
+            # Preparação Visual da Tabela
             df_display = df.copy()
             def icone_motivo(m):
                 if "Domingo" in m or "Feriado" in m: return "🔴 " + m
@@ -236,12 +238,23 @@ with col_view:
                 return "🔵 " + m
             df_display['motivo_visual'] = df_display['motivo'].apply(icone_motivo)
 
+            # [MELHORIA UX] Renomeando colunas para português amigável
+            df_final = df_display[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo_visual', 'obs']].rename(columns={
+                'data': 'Data',
+                'horas_escritorio': 'Escritório',
+                'horas_casa': 'Casa',
+                'total_trabalhado': 'Total',
+                'saldo': 'Saldo',
+                'motivo_visual': 'Status',   # Renomeado de motivo_visual
+                'obs': 'Observações'         # A nova coluna pedida!
+            })
+
             st.dataframe(
-                df_display[['data', 'horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo', 'motivo_visual']]
-                .sort_values('data', ascending=False)
-                .style.format("{:.2f}", subset=['horas_escritorio', 'horas_casa', 'total_trabalhado', 'saldo'])
-                .background_gradient(subset=['saldo'], cmap='RdYlGn', vmin=-8, vmax=8),
-                use_container_width=True
+                df_final.sort_values('Data', ascending=False)
+                .style.format("{:.2f}", subset=['Escritório', 'Casa', 'Total', 'Saldo'])
+                .background_gradient(subset=['Saldo'], cmap='RdYlGn', vmin=-8, vmax=8),
+                use_container_width=True,
+                hide_index=True # Esconde o índice numérico (0, 1, 2...) que não serve pra nada
             )
             st.download_button("📥 Excel", ut.to_excel(df), "ponto.xlsx")
         else:

@@ -154,3 +154,44 @@ def to_excel(df):
         worksheet.set_column('A:A', 12)
         worksheet.set_column('B:K', 10)
     return output.getvalue()
+
+# --- VALIDAÇÃO DE INTEGRIDADE (NOVA FUNÇÃO) ---
+def validar_registro(entrada, almoco_ida, almoco_volta, saida, is_falta):
+    """
+    Verifica se os horários fazem sentido lógico.
+    Retorna: (bool, str) -> (Passou?, Mensagem de Erro)
+    """
+    # 1. Se for falta, tudo bem estar zerado
+    if is_falta:
+        return True, ""
+
+    # 2. Converte para timedelta para comparar
+    def td(t): return timedelta(hours=t.hour, minutes=t.minute)
+    
+    t_ent = td(entrada)
+    t_sai = td(saida)
+    t_ai = td(almoco_ida)
+    t_av = td(almoco_volta)
+    
+    # Regra A: Saída deve ser depois da Entrada (Considerando mesmo dia)
+    # Nota: Se seu sistema aceita virada de noite (ex: entra 22h sai 05h), 
+    # essa validação precisa ser mais complexa. Assumindo dia comercial aqui:
+    if t_sai <= t_ent and t_sai != timedelta(0): 
+        # Aceitamos saida 00:00 como "não bateu ainda", mas se preencheu, tem que ser maior
+        return False, "❌ A Saída não pode ser anterior à Entrada!"
+
+    # Regra B: Almoço deve estar 'dentro' da jornada
+    if t_ai < t_ent or t_ai > t_sai:
+        return False, "❌ O horário de almoço deve estar entre a Entrada e a Saída."
+
+    # Regra C: Volta do almoço deve ser depois da ida
+    if t_av <= t_ai:
+        return False, "❌ A volta do almoço deve ser depois da ida."
+        
+    # Regra D: Almoço Mínimo (CLT - 1 hora) - Opcional, vamos por como aviso
+    tempo_almoco = (t_av - t_ai).total_seconds() / 3600
+    if tempo_almoco < 1.0 and tempo_almoco > 0:
+        # Não bloqueia, mas é bom saber. (Aqui vamos retornar True, mas poderia ser warning)
+        pass 
+
+    return True, ""
